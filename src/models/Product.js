@@ -16,13 +16,23 @@ const colorStockSchema = new mongoose.Schema(
 
 /**
  * Per-pack stock breakdown (e.g. "Small pack" / "Big pack") where each
- * pack carries its OWN price. Mutually exclusive with colors: a product
- * tracks either colors or packs, never both. `quantity` stays the TOTAL.
+ * pack carries its OWN price, MRP and cost price. Mutually exclusive with
+ * colors: a product tracks either colors or packs, never both.
+ * `quantity` stays the TOTAL.
+ *
+ * `mrp` and `cost_price` are optional on purpose: documents written before
+ * these fields existed stay valid. Readers fall back to `price` (MRP) and 0
+ * (cost) via `decorate()` in routes/products.js.
  */
 const packStockSchema = new mongoose.Schema(
   {
     label: { type: String, required: true, trim: true, maxlength: 40 },
+    // Selling price of this pack (what the customer pays).
     price: { type: Number, required: true, min: [0, 'Pack price cannot be negative.'] },
+    // MRP = printed price of this pack.
+    mrp: { type: Number, min: [0, 'Pack MRP cannot be negative.'] },
+    // Cost price = what you pay for this pack.
+    cost_price: { type: Number, min: [0, 'Pack cost price cannot be negative.'] },
     quantity: { type: Number, required: true, min: [0, 'Pack quantity cannot be negative.'] },
   },
   { _id: false }
