@@ -8,7 +8,7 @@ import { validate } from '../middleware/validate.js';
 import { conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
-import { resolveColor, resolvePack, deductStock, restoreStock, decoratePacks } from '../utils/stock.js';
+import { resolveColor, resolvePack, deductStock, restoreStock, decorateProductVariants } from '../utils/stock.js';
 
 const router = Router();
 
@@ -87,7 +87,7 @@ router.get('/:id', async (req, res, next) => {
           : null,
         items: items.map((i) => {
           const product = i.product_id ? serialize(i.product_id) : null;
-          if (product) product.packs = decoratePacks(product.packs);
+          if (product) decorateProductVariants(product);
           return {
             ...serialize(i),
             order_id: String(order._id),
@@ -178,8 +178,11 @@ router.post(
 
       const item = serialize(result.item);
       const product = serialize(result.product);
-      product.packs = decoratePacks(product.packs);
-      const suffix = item.color || item.pack ? ` (${item.color || item.pack})` : '';
+      decorateProductVariants(product);
+      const isBigSize =
+        !item.color && !item.pack && Array.isArray(product.packs) && product.packs.length > 0;
+      const suffix =
+        item.color || item.pack ? ` (${item.color || item.pack})` : isBigSize ? ' (big size)' : '';
       res.status(201).json({
         item: {
           ...item,
@@ -223,7 +226,7 @@ router.delete('/:id/items/:itemId', async (req, res, next) => {
     });
 
     const product = result.product ? serialize(result.product) : null;
-    if (product) product.packs = decoratePacks(product.packs);
+    if (product) decorateProductVariants(product);
     const suffix = result.item.color || result.item.pack ? ` (${result.item.color || result.item.pack})` : '';
     res.json({
       message: product
