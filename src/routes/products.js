@@ -4,7 +4,7 @@ import { Product } from '../models/Product.js';
 import { validate } from '../middleware/validate.js';
 import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { serialize, escapeRegex } from '../utils/serialize.js';
-import { normalizeColors, normalizePacks } from '../utils/stock.js';
+import { normalizeColors, normalizePacks, decoratePacks } from '../utils/stock.js';
 import { LOW_STOCK_THRESHOLD } from '../config/db.js';
 
 const router = Router();
@@ -64,7 +64,7 @@ function decorate(product) {
   p.low_stock = p.quantity <= LOW_STOCK_THRESHOLD;
   p.colors = Array.isArray(p.colors) ? p.colors : [];
   p.tracks_colors = p.colors.length > 0;
-  p.packs = Array.isArray(p.packs) ? p.packs : [];
+  p.packs = decoratePacks(p.packs);
   p.tracks_packs = p.packs.length > 0;
   return p;
 }
