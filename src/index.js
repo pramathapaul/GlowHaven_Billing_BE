@@ -13,7 +13,13 @@ const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json());
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'GlowHaven Billing API is running',
+    timestamp: new Date().toISOString(),
+  });
+});
 
 app.use('/api/products', productsRouter);
 app.use('/api/customers', customersRouter);
