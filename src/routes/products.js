@@ -4,7 +4,7 @@ import { Product } from '../models/Product.js';
 import { validate } from '../middleware/validate.js';
 import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { serialize, escapeRegex } from '../utils/serialize.js';
-import { normalizeColors, normalizePacks, decoratePacks } from '../utils/stock.js';
+import { normalizeColors, normalizePacks, decoratePacks, baseStockOf } from '../utils/stock.js';
 import { LOW_STOCK_THRESHOLD } from '../config/db.js';
 
 const router = Router();
@@ -18,12 +18,28 @@ const productRules = [
   body('unit').trim().notEmpty().withMessage('Unit is required.'),
   // Optional: when the product tracks colors/packs the total is derived from them.
   body('quantity').optional().isFloat({ min: 0 }).withMessage('Quantity must be 0 or more.').toFloat(),
+  // Big/original size stock — only meaningful when the product has packs.
+  body('base_quantity').optional({ nullable: true }).isInt({ min: 0, max: 100000000 })
+    .withMessage('Big-size quantity must be a whole number of 0 or more.').toInt(),
   body('mrp').isFloat({ min: 0 }).withMessage('MRP must be 0 or more.').toFloat(),
   body('selling_price').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Selling price must be 0 or more.').toFloat(),
   body('cost_price').isFloat({ min: 0 }).withMessage('Cost price must be 0 or more.').toFloat(),
 ];
 
-/** Total = sum of color/pack buckets when tracked, else the given quantity.
+/** Big/original size stock from the payload. Empty/missing = 0 for pack
+ *  products, otherwise it mirrors the plain quantity. */
+function resolveBaseQuantity(body, packs, fallbackQuantity) {
+  if (packs.length === 0) return fallbackQuantity;
+  const raw = body.base_quantity;
+  if (raw === undefined || raw === null || raw === '') return 0;
+  const base = Number(raw);
+  if (!Number.isInteger(base) || base < 0) {
+    throw badRequest('Big-size quantity must be a whole number of 0 or more.');
+  }
+  return base;
+}
+
+/** Total = big-size stock + color/pack buckets when tracked, else the given quantity.
  *  Colors and packs are mutually exclusive (a product tracks one or the other). */
 function resolveVariants(body) {
   const colors = normalizeColors(body.colors);
@@ -32,18 +48,12 @@ function resolveVariants(body) {
     throw badRequest('A product can track stock by colors OR packs, not both.');
   }
   if (packs.length > 0) {
-    return {
-      colors: [],
-      packs,
-      quantity: packs.reduce((sum, p) => sum + p.quantity, 0),
-    };
+    const baseQuantity = resolveBaseQuantity(body, packs, 0);
+    return { colors: [], packs, quantity: baseQuantity + packs.reduce((sum, p) => sum + p.quantity, 0) };
   }
   if (colors.length > 0) {
-    return {
-      colors,
-      packs: [],
-      quantity: colors.reduce((sum, c) => sum + c.quantity, 0),
-    };
+    const quantity = colors.reduce((sum, c) => sum + c.quantity, 0);
+    return { colors, packs: [], quantity };
   }
   const quantity = Number(body.quantity);
   if (body.quantity === undefined || body.quantity === null || body.quantity === '') {
@@ -66,6 +76,8 @@ function decorate(product) {
   p.tracks_colors = p.colors.length > 0;
   p.packs = decoratePacks(p.packs);
   p.tracks_packs = p.packs.length > 0;
+  // Big/original size stock (equals `quantity` for products without packs).
+  p.base_quantity = baseStockOf(p);
   return p;
 }
 
@@ -143,7 +155,13 @@ router.put('/:id', productRules, validate, async (req, res, next) => {
     const product = await Product.findById(req.params.id);
     if (!product) throw notFound('Product not found.');
     if (product.deleted_at) throw conflict('This product is deleted. Restore it before editing.');
-    const { colors, packs, quantity } = resolveVariants(req.body);
+    // Callers that don't send base_quantity (older clients) keep the big-size
+    // stock the product already has — never silently wipe it.
+    const payload = { ...req.body };
+    if (payload.base_quantity === undefined) {
+      payload.base_quantity = baseStockOf(product);
+    }
+    const { colors, packs, quantity } = resolveVariants(payload);
     const normalisedSku = String(req.body.sku).trim().toUpperCase();
     const clash = await Product.findOne({ sku: normalisedSku, _id: { $ne: product._id } });
     if (clash) throw conflict(`SKU "${normalisedSku}" already exists.`);
