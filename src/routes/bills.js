@@ -11,7 +11,7 @@ import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
 import { calcBillTotals, toPaise } from '../utils/money.js';
-import { resolveColor, resolvePack, deductStock, restoreStock } from '../utils/stock.js';
+import { resolveColor, resolvePack, deductStock, restoreStock, decoratePacks } from '../utils/stock.js';
 
 const router = Router();
 const BILLABLE_ORDER_STATUSES = ['draft', 'confirmed'];
@@ -48,7 +48,10 @@ function parseAmount(value, name) {
 
 async function billView(bill) {
   const [items, customer] = await Promise.all([
-    BillItem.find({ bill_id: bill._id }).populate('product_id', 'name sku unit mrp').lean(),
+    BillItem.find({ bill_id: bill._id })
+      // `packs` + `selling_price` let clients show the pack's own MRP/price per line.
+      .populate('product_id', 'name sku unit mrp selling_price packs')
+      .lean(),
     Customer.findById(bill.customer_id).lean(),
   ]);
   const order = bill.order_id ? await Order.findById(bill.order_id).lean() : null;
@@ -73,11 +76,20 @@ async function billView(bill) {
       : null,
     items: items.map((i) => {
       const product = i.product_id ? serialize(i.product_id) : null;
+      if (product) product.packs = decoratePacks(product.packs);
+      // MRP shown on the bill: the pack's own MRP when the line used a pack,
+      // otherwise the product MRP. (Legacy packs fall back to their price.)
+      const packEntry =
+        i.pack && product
+          ? (product.packs || []).find((p) => p.label.toLowerCase() === String(i.pack).toLowerCase())
+          : null;
+      const mrp = packEntry ? (packEntry.mrp ?? packEntry.price) : product?.mrp ?? null;
       return {
         ...serialize(i),
         bill_id: String(bill._id),
         product_id: product ? product.id : String(i.product_id),
         product,
+        mrp,
         line_total: Math.round(i.quantity * i.price * 100) / 100,
       };
     }),
@@ -146,7 +158,7 @@ router.get('/:id/csv', async (req, res, next) => {
       ...view.items.map((i) => [
         i.product ? i.product.name : '',
         i.product ? i.product.sku : '',
-        i.product && i.product.mrp != null ? i.product.mrp : '',
+        i.mrp ?? '',
         i.color || '',
         i.pack || '',
         i.quantity,
@@ -303,6 +315,7 @@ router.post('/toggle-item', async (req, res, next) => {
     });
 
     const product = outcome.product ? serialize(outcome.product) : null;
+    if (product) product.packs = decoratePacks(product.packs);
     res.json({
       item: {
         ...serialize(outcome.item),
