@@ -62,6 +62,10 @@ const productSchema = new mongoose.Schema(
     },
     colors: { type: [colorStockSchema], default: [] },
     packs: { type: [packStockSchema], default: [] },
+    // NOTE: the ORIGINAL / big size of a pack-tracked product is NOT a stored
+    // field — it is always derived as `quantity - sum(packs.quantity)` (see
+    // baseStockOf() in utils/stock.js), so total and parts can never drift.
+    // A bill/order line with NO pack sells that big size.
     // Soft-delete flag (kept out of the core spec fields but required for soft-delete).
     deleted_at: { type: Date, default: null },
   },
