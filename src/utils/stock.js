@@ -58,11 +58,15 @@ export function resolveColor(product, colorValue) {
 
 /**
  * Validates/normalises the `packs` payload of a product (create/update).
- * Returns [{ label, price, quantity }] with unique, trimmed labels.
+ * Returns [{ label, price, mrp, cost_price, quantity }] with unique, trimmed labels.
+ * `mrp`/`cost_price` are optional for backwards compatibility: a missing MRP
+ * falls back to the pack's selling price, a missing cost price to 0.
  */
 export function normalizePacks(raw) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw badRequest('packs must be an array of { label, price, quantity }.');
+  if (!Array.isArray(raw)) {
+    throw badRequest('packs must be an array of { label, price, mrp, cost_price, quantity }.');
+  }
   if (raw.length > 50) throw badRequest('A product can track at most 50 packs.');
 
   const seen = new Set();
@@ -71,10 +75,21 @@ export function normalizePacks(raw) {
     const label = String(entry?.label ?? '').trim();
     const price = Number(entry?.price);
     const quantity = Number(entry?.quantity);
+    const mrp = entry?.mrp === undefined || entry?.mrp === null || entry?.mrp === '' ? price : Number(entry.mrp);
+    const costPrice =
+      entry?.cost_price === undefined || entry?.cost_price === null || entry?.cost_price === ''
+        ? 0
+        : Number(entry.cost_price);
     if (!label) throw badRequest('Every pack needs a label.');
     if (label.length > 40) throw badRequest(`Pack label "${label.slice(0, 20)}…" is too long (max 40).`);
     if (!Number.isFinite(price) || price < 0) {
       throw badRequest(`Pack "${label}" needs a price of 0 or more.`);
+    }
+    if (!Number.isFinite(mrp) || mrp < 0) {
+      throw badRequest(`Pack "${label}" needs an MRP of 0 or more.`);
+    }
+    if (!Number.isFinite(costPrice) || costPrice < 0) {
+      throw badRequest(`Pack "${label}" needs a cost price of 0 or more.`);
     }
     if (!Number.isInteger(quantity) || quantity < 0) {
       throw badRequest(`Pack "${label}" needs a whole-number quantity of 0 or more.`);
@@ -82,7 +97,7 @@ export function normalizePacks(raw) {
     const key = label.toLowerCase();
     if (seen.has(key)) throw badRequest(`Duplicate pack "${label}".`);
     seen.add(key);
-    out.push({ label, price, quantity });
+    out.push({ label, price, mrp, cost_price: costPrice, quantity });
   }
   return out;
 }
@@ -90,8 +105,9 @@ export function normalizePacks(raw) {
 /**
  * Resolves the pack a line item must draw from.
  * - product WITHOUT packs -> null (a passed pack is an error)
- * - product WITH packs    -> the canonical stored label + its price (required)
- * Returns { label, price } or null.
+ * - product WITH packs    -> the canonical stored label + its price/MRP/cost (required)
+ * Returns { label, price, mrp, cost_price } or null.
+ * Legacy packs without stored mrp/cost fall back to the pack price and 0.
  */
 export function resolvePack(product, packValue) {
   const raw = packValue === undefined || packValue === null ? null : String(packValue).trim();
@@ -107,7 +123,12 @@ export function resolvePack(product, packValue) {
         `"${product.name}" has no pack "${raw}". Available: ${product.packs.map((p) => p.label).join(', ')}.`
       );
     }
-    return { label: match.label, price: match.price };
+    return {
+      label: match.label,
+      price: match.price,
+      mrp: match.mrp ?? match.price,
+      cost_price: match.cost_price ?? 0,
+    };
   }
 
   if (raw) throw badRequest(`"${product.name}" does not track packs.`);
@@ -177,3 +198,23 @@ export async function restoreStock(session, { productId, quantity, color = null,
 }
 
 export const colorTotal = (colors) => colors.reduce((sum, c) => sum + c.quantity, 0);
+
+/**
+ * Normalises a product's `packs` array for API responses: legacy packs (saved
+ * before MRP/cost existed) get `mrp` = their selling price and `cost_price` = 0,
+ * and every pack gains `margin` / `margin_percent`.
+ */
+export function decoratePacks(packs) {
+  if (!Array.isArray(packs)) return [];
+  return packs.map((x) => {
+    const mrp = x.mrp ?? x.price;
+    const cost_price = x.cost_price ?? 0;
+    return {
+      ...x,
+      mrp,
+      cost_price,
+      margin: Math.round((mrp - cost_price) * 100) / 100,
+      margin_percent: cost_price > 0 ? Math.round(((mrp - cost_price) / cost_price) * 10000) / 100 : null,
+    };
+  });
+}
