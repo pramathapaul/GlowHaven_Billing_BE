@@ -11,7 +11,7 @@ import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
 import { calcBillTotals, toPaise } from '../utils/money.js';
-import { resolveColor, resolvePack, deductStock, restoreStock, decoratePacks } from '../utils/stock.js';
+import { resolveColor, resolvePack, deductStock, restoreStock, decorateProductVariants, baseStockOf } from '../utils/stock.js';
 
 const router = Router();
 const BILLABLE_ORDER_STATUSES = ['draft', 'confirmed'];
@@ -76,7 +76,7 @@ async function billView(bill) {
       : null,
     items: items.map((i) => {
       const product = i.product_id ? serialize(i.product_id) : null;
-      if (product) product.packs = decoratePacks(product.packs);
+      if (product) decorateProductVariants(product);
       // MRP shown on the bill: the pack's own MRP when the line used a pack,
       // otherwise the product MRP. (Legacy packs fall back to their price.)
       const packEntry =
@@ -206,6 +206,8 @@ router.delete('/:id', async (req, res, next) => {
             productId: item.product_id,
             quantity: item.quantity,
             color: item.color,
+            // Pack (or big size, when null) must go back to the right bucket.
+            pack: item.pack,
           });
           restored += item.quantity;
         }
@@ -315,7 +317,7 @@ router.post('/toggle-item', async (req, res, next) => {
     });
 
     const product = outcome.product ? serialize(outcome.product) : null;
-    if (product) product.packs = decoratePacks(product.packs);
+    if (product) decorateProductVariants(product);
     res.json({
       item: {
         ...serialize(outcome.item),
@@ -448,22 +450,27 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
           continue;
         }
 
-        const variant = color || (pack ? pack.label : null);
+        // No pack chosen on a pack-tracked product = the big/original size.
+        const isBase = Boolean(pack && pack.base);
+        const variant = color || (pack && pack.label ? pack.label : null);
+        const variantLabel = variant || (isBase ? 'big size' : null);
         const totalKey = String(product._id);
-        const variantKey = `${product._id}|${(variant || '').toLowerCase()}`;
+        const variantKey = `${product._id}|${(variantLabel || '').toLowerCase()}`;
 
         const availableTotal = product.quantity - (pendingTotal.get(totalKey) || 0);
         const bucketEntry = color
           ? product.colors.find((c) => c.color.toLowerCase() === color.toLowerCase())
-          : pack
+          : pack && pack.label
             ? product.packs.find((p) => p.label.toLowerCase() === pack.label.toLowerCase())
             : null;
-        const availableVariant = bucketEntry
-          ? bucketEntry.quantity - (pendingVariant.get(variantKey) || 0)
-          : availableTotal;
+        const availableVariant = isBase
+          ? baseStockOf(product) - (pendingVariant.get(variantKey) || 0)
+          : bucketEntry
+            ? bucketEntry.quantity - (pendingVariant.get(variantKey) || 0)
+            : availableTotal;
 
         if (entry.quantity > availableVariant) {
-          const suffix = variant ? ` (${variant})` : '';
+          const suffix = variantLabel ? ` (${variantLabel})` : '';
           errors.push(
             `Insufficient stock for "${product.name}"${suffix}: requested ${entry.quantity}, available ${availableVariant}.`
           );
@@ -471,7 +478,7 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
         }
 
         pendingTotal.set(totalKey, (pendingTotal.get(totalKey) || 0) + entry.quantity);
-        if (variant) pendingVariant.set(variantKey, (pendingVariant.get(variantKey) || 0) + entry.quantity);
+        if (variantLabel) pendingVariant.set(variantKey, (pendingVariant.get(variantKey) || 0) + entry.quantity);
 
         lines.push({
           product,
