@@ -8,7 +8,7 @@ import { validate } from '../middleware/validate.js';
 import { conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
-import { resolveColor, resolvePack, deductStock, restoreStock } from '../utils/stock.js';
+import { resolveColor, resolvePack, deductStock, restoreStock, decoratePacks } from '../utils/stock.js';
 
 const router = Router();
 
@@ -74,7 +74,7 @@ router.get('/:id', async (req, res, next) => {
     if (!order) throw notFound('Order not found.');
 
     const items = await OrderItem.find({ order_id: order._id })
-      .populate('product_id', 'name sku unit mrp quantity colors deleted_at')
+      .populate('product_id', 'name sku unit mrp selling_price quantity colors packs deleted_at')
       .lean();
     const customer = await Customer.findById(order.customer_id).lean();
 
@@ -87,6 +87,7 @@ router.get('/:id', async (req, res, next) => {
           : null,
         items: items.map((i) => {
           const product = i.product_id ? serialize(i.product_id) : null;
+          if (product) product.packs = decoratePacks(product.packs);
           return {
             ...serialize(i),
             order_id: String(order._id),
@@ -177,6 +178,7 @@ router.post(
 
       const item = serialize(result.item);
       const product = serialize(result.product);
+      product.packs = decoratePacks(product.packs);
       const suffix = item.color || item.pack ? ` (${item.color || item.pack})` : '';
       res.status(201).json({
         item: {
@@ -221,6 +223,7 @@ router.delete('/:id/items/:itemId', async (req, res, next) => {
     });
 
     const product = result.product ? serialize(result.product) : null;
+    if (product) product.packs = decoratePacks(product.packs);
     const suffix = result.item.color || result.item.pack ? ` (${result.item.color || result.item.pack})` : '';
     res.json({
       message: product
