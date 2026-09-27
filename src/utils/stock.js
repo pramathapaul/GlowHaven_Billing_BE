@@ -105,17 +105,26 @@ export function normalizePacks(raw) {
 /**
  * Resolves the pack a line item must draw from.
  * - product WITHOUT packs -> null (a passed pack is an error)
- * - product WITH packs    -> the canonical stored label + its price/MRP/cost (required)
- * Returns { label, price, mrp, cost_price } or null.
- * Legacy packs without stored mrp/cost fall back to the pack price and 0.
+ * - product WITH packs    -> the chosen pack's label + price/MRP/cost, OR
+ *                            the BIG/ORIGINAL size when no pack was chosen.
+ * Returns { label, price, mrp, cost_price } (label=null + base=true for the
+ * big size) or null. Legacy packs without stored mrp/cost fall back to the
+ * pack price and 0.
  */
 export function resolvePack(product, packValue) {
   const raw = packValue === undefined || packValue === null ? null : String(packValue).trim();
   const hasPacks = Array.isArray(product.packs) && product.packs.length > 0;
 
   if (hasPacks) {
+    // No size chosen -> the product as it was originally added (the big size).
     if (!raw) {
-      throw badRequest(`"${product.name}" tracks stock by pack — please choose a pack.`);
+      return {
+        label: null,
+        base: true,
+        price: product.selling_price ?? product.mrp,
+        mrp: product.mrp,
+        cost_price: product.cost_price ?? 0,
+      };
     }
     const match = product.packs.find((p) => p.label.toLowerCase() === raw.toLowerCase());
     if (!match) {
@@ -135,17 +144,44 @@ export function resolvePack(product, packValue) {
   return null;
 }
 
+/**
+ * Stock of the ORIGINAL / big size (the product as first created) when the
+ * product also carries packs: whatever is left in the total after every pack
+ * bucket. Products without packs have no split, so their whole quantity is
+ * the sellable amount. Derived on purpose — it can never drift from `quantity`.
+ */
+export function baseStockOf(product) {
+  const packs = Array.isArray(product.packs) ? product.packs : [];
+  if (!packs.length) return product.quantity ?? 0;
+  const packSum = packs.reduce((sum, x) => sum + (x.quantity || 0), 0);
+  return Math.max(0, (product.quantity ?? 0) - packSum);
+}
+
 /** Which bucket a line draws from: packs (label) wins over colors (color). */
 const bucketOf = (color, pack) =>
   pack ? { arr: 'packs', key: 'label', value: pack } : color ? { arr: 'colors', key: 'color', value: color } : null;
 
 /**
  * Atomically deducts `quantity` (and, when set, the same amount from the
- * color/pack bucket) inside the caller's transaction session. Throws a clear
- * 409 when stock is short — nothing is written in that case.
+ * color/pack bucket) inside the caller's transaction session. A pack-tracked
+ * product called WITHOUT a pack deducts the big/original size (base_quantity).
+ * Throws a clear 409 when stock is short — nothing is written in that case.
  */
 export async function deductStock(session, product, quantity, color = null, pack = null) {
   const bucket = bucketOf(color, pack);
+  // No bucket on a pack-tracked product = the big/original size.
+  const isBase = !bucket && Array.isArray(product.packs) && product.packs.length > 0;
+  if (isBase) {
+    // Big size = total − every pack bucket; verify it before touching the total.
+    const current = await Product.findById(product._id).session(session);
+    if (!current) throw notFound('Product no longer exists.');
+    const availableBase = baseStockOf(current);
+    if (availableBase < quantity) {
+      throw conflict(
+        `Insufficient stock for "${current.name}" (big size): requested ${quantity}, available ${availableBase}.`
+      );
+    }
+  }
   const query = { _id: product._id, quantity: { $gte: quantity } };
   const inc = { quantity: -quantity };
   if (bucket) {
@@ -158,10 +194,12 @@ export async function deductStock(session, product, quantity, color = null, pack
 
   const fresh = await Product.findById(product._id).session(session);
   if (!fresh) throw notFound('Product no longer exists.');
-  const available = bucket
-    ? fresh[bucket.arr].find((e) => String(e[bucket.key]).toLowerCase() === String(bucket.value).toLowerCase())?.quantity ?? 0
-    : fresh.quantity;
-  const suffix = bucket ? ` (${bucket.value})` : '';
+  const available = isBase
+    ? baseStockOf(fresh)
+    : bucket
+      ? fresh[bucket.arr].find((e) => String(e[bucket.key]).toLowerCase() === String(bucket.value).toLowerCase())?.quantity ?? 0
+      : fresh.quantity;
+  const suffix = isBase ? ' (big size)' : bucket ? ` (${bucket.value})` : '';
   throw conflict(
     `Insufficient stock for "${fresh.name}"${suffix}: requested ${quantity}, available ${available}.`
   );
@@ -175,6 +213,8 @@ export async function deductStock(session, product, quantity, color = null, pack
  */
 export async function restoreStock(session, { productId, quantity, color = null, pack = null }) {
   const bucket = bucketOf(color, pack);
+  // No bucket (incl. the big size of a pack-tracked product): only the total
+  // changes, and the big size is derived from it — so nothing else to credit.
   if (!bucket) {
     await Product.updateOne({ _id: productId }, { $inc: { quantity } }, { session });
     return;
@@ -217,4 +257,16 @@ export function decoratePacks(packs) {
       margin_percent: cost_price > 0 ? Math.round(((mrp - cost_price) / cost_price) * 10000) / 100 : null,
     };
   });
+}
+
+/**
+ * Cheap variant decoration for products embedded in order/bill responses:
+ * normalised packs + the derived big-size stock (`base_quantity`), so clients
+ * never have to recompute `total − packs` themselves.
+ */
+export function decorateProductVariants(product) {
+  if (!product) return product;
+  product.packs = decoratePacks(product.packs);
+  product.base_quantity = baseStockOf(product);
+  return product;
 }
