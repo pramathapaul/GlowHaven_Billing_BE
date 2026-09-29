@@ -14,30 +14,6 @@ const colorStockSchema = new mongoose.Schema(
   { _id: false }
 );
 
-/**
- * Per-pack stock breakdown (e.g. "Small pack" / "Big pack") where each
- * pack carries its OWN price, MRP and cost price. Mutually exclusive with
- * colors: a product tracks either colors or packs, never both.
- * `quantity` stays the TOTAL.
- *
- * `mrp` and `cost_price` are optional on purpose: documents written before
- * these fields existed stay valid. Readers fall back to `price` (MRP) and 0
- * (cost) via `decorate()` in routes/products.js.
- */
-const packStockSchema = new mongoose.Schema(
-  {
-    label: { type: String, required: true, trim: true, maxlength: 40 },
-    // Selling price of this pack (what the customer pays).
-    price: { type: Number, required: true, min: [0, 'Pack price cannot be negative.'] },
-    // MRP = printed price of this pack.
-    mrp: { type: Number, min: [0, 'Pack MRP cannot be negative.'] },
-    // Cost price = what you pay for this pack.
-    cost_price: { type: Number, min: [0, 'Pack cost price cannot be negative.'] },
-    quantity: { type: Number, required: true, min: [0, 'Pack quantity cannot be negative.'] },
-  },
-  { _id: false }
-);
-
 const productSchema = new mongoose.Schema(
   {
     name: { type: String, required: [true, 'Product name is required.'], trim: true, maxlength: 200 },
@@ -61,11 +37,6 @@ const productSchema = new mongoose.Schema(
       min: [0, 'Cost price cannot be negative.'],
     },
     colors: { type: [colorStockSchema], default: [] },
-    packs: { type: [packStockSchema], default: [] },
-    // NOTE: the ORIGINAL / big size of a pack-tracked product is NOT a stored
-    // field — it is always derived as `quantity - sum(packs.quantity)` (see
-    // baseStockOf() in utils/stock.js), so total and parts can never drift.
-    // A bill/order line with NO pack sells that big size.
     // Soft-delete flag (kept out of the core spec fields but required for soft-delete).
     deleted_at: { type: Date, default: null },
   },
