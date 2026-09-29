@@ -8,7 +8,6 @@ const billItemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: [1, 'Quantity must be at least 1.'] },
     price: { type: Number, required: true, min: 0 },
     color: { type: String, default: null, maxlength: 40 },
-    pack: { type: String, default: null, maxlength: 40 },
   },
   jsonOptions()
 );
