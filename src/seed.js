@@ -30,17 +30,12 @@ const products = [
     colors: [{ color: 'Red', quantity: 10 }, { color: 'Blue', quantity: 12 }, { color: 'Green', quantity: 13 }] },
   { name: 'Notebook A5', sku: 'STAT-NBK-09', category: 'Stationery', quantity: 200, unit: 'pcs', mrp: 149, selling_price: 139, cost_price: 70 },
   { name: 'Ball Pen (Blue)', sku: 'STAT-PEN-10', category: 'Stationery', quantity: 500, unit: 'pcs', mrp: 20, selling_price: 18, cost_price: 8 },
-  { name: 'Assorted Cookies', sku: 'GROC-CKE-11', category: 'Grocery', unit: 'pack', mrp: 150, selling_price: 140, cost_price: 90,
-    packs: [{ label: 'Small pack', price: 50, quantity: 30 }, { label: 'Big pack', price: 150, quantity: 12 }] },
+  { name: 'Assorted Cookies', sku: 'GROC-CKE-11', category: 'Grocery', quantity: 50, unit: 'pack', mrp: 150, selling_price: 140, cost_price: 90 },
 ];
 
-// Products with a `colors`/`packs` breakdown get their total derived from the buckets.
+// Products with a `colors` breakdown get their total derived from them.
 const withTotal = (p) =>
-  p.colors
-    ? { ...p, quantity: p.colors.reduce((s, c) => s + c.quantity, 0) }
-    : p.packs
-      ? { ...p, quantity: p.packs.reduce((s, x) => s + x.quantity, 0) }
-      : p;
+  p.colors ? { ...p, quantity: p.colors.reduce((s, c) => s + c.quantity, 0) } : p;
 
 const customers = [
   { name: 'Aarav Sharma', phone: '+91 98765 43210', email: 'aarav@example.com', address: '12 MG Road, Bengaluru 560001' },
