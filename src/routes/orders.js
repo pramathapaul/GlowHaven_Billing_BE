@@ -8,7 +8,7 @@ import { validate } from '../middleware/validate.js';
 import { conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
-import { resolveColor, resolvePack, deductStock, restoreStock, decorateProductVariants } from '../utils/stock.js';
+import { resolveColor, deductStock, restoreStock } from '../utils/stock.js';
 
 const router = Router();
 
@@ -74,7 +74,7 @@ router.get('/:id', async (req, res, next) => {
     if (!order) throw notFound('Order not found.');
 
     const items = await OrderItem.find({ order_id: order._id })
-      .populate('product_id', 'name sku unit mrp selling_price quantity colors packs deleted_at')
+      .populate('product_id', 'name sku unit mrp selling_price quantity colors deleted_at')
       .lean();
     const customer = await Customer.findById(order.customer_id).lean();
 
@@ -87,7 +87,6 @@ router.get('/:id', async (req, res, next) => {
           : null,
         items: items.map((i) => {
           const product = i.product_id ? serialize(i.product_id) : null;
-          if (product) decorateProductVariants(product);
           return {
             ...serialize(i),
             order_id: String(order._id),
@@ -134,8 +133,6 @@ router.post(
     body('quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1.').toInt(),
     body('color').optional({ nullable: true }).trim()
       .isLength({ max: 40 }).withMessage('Color name must be 40 characters or fewer.'),
-    body('pack').optional({ nullable: true }).trim()
-      .isLength({ max: 40 }).withMessage('Pack label must be 40 characters or fewer.'),
   ],
   validate,
   async (req, res, next) => {
@@ -152,11 +149,9 @@ router.post(
 
         // Color is mandatory when the product tracks colors, forbidden otherwise.
         const color = resolveColor(product, req.body.color);
-        // Pack is mandatory when the product tracks packs, forbidden otherwise.
-        const pack = resolvePack(product, req.body.pack);
 
         // Atomic guard: only deduct when enough stock (total + bucket) is still there.
-        const deducted = await deductStock(session, product, quantity, color, pack ? pack.label : null);
+        const deducted = await deductStock(session, product, quantity, color);
 
         const [item] = await OrderItem.create(
           [
@@ -164,10 +159,8 @@ router.post(
               order_id: order._id,
               product_id: product._id,
               quantity,
-              // Pack products bill at the pack's own price; everything else at the selling price.
-              price_at_order: pack ? pack.price : (product.selling_price ?? product.mrp),
+              price_at_order: product.selling_price ?? product.mrp,
               color,
-              pack: pack ? pack.label : null,
             },
           ],
           { session }
@@ -178,11 +171,7 @@ router.post(
 
       const item = serialize(result.item);
       const product = serialize(result.product);
-      decorateProductVariants(product);
-      const isBigSize =
-        !item.color && !item.pack && Array.isArray(product.packs) && product.packs.length > 0;
-      const suffix =
-        item.color || item.pack ? ` (${item.color || item.pack})` : isBigSize ? ' (big size)' : '';
+      const suffix = item.color ? ` (${item.color})` : '';
       res.status(201).json({
         item: {
           ...item,
@@ -212,12 +201,11 @@ router.delete('/:id/items/:itemId', async (req, res, next) => {
       let product = null;
       if (!item.excluded_from_bill) {
         // Stock was deducted when this item was added → give it back
-        // (to the right color/pack bucket when one was used).
+        // (to the right color bucket when one was used).
         await restoreStock(session, {
           productId: item.product_id,
           quantity: item.quantity,
           color: item.color,
-          pack: item.pack,
         });
         product = await Product.findById(item.product_id).session(session);
       }
@@ -226,8 +214,7 @@ router.delete('/:id/items/:itemId', async (req, res, next) => {
     });
 
     const product = result.product ? serialize(result.product) : null;
-    if (product) decorateProductVariants(product);
-    const suffix = result.item.color || result.item.pack ? ` (${result.item.color || result.item.pack})` : '';
+    const suffix = result.item.color ? ` (${result.item.color})` : '';
     res.json({
       message: product
         ? `Item removed. ${quantityWord(result.item.quantity)}${suffix} returned to stock (now ${product.quantity}).`
@@ -276,7 +263,6 @@ router.patch(
               productId: item.product_id,
               quantity: item.quantity,
               color: item.color,
-              pack: item.pack,
             });
           }
         }
