@@ -39,20 +39,8 @@ router.get('/stats', async (req, res, next) => {
       : [];
     const bcmap = new Map(billCustomers.map((c) => [String(c._id), c.name]));
 
-    // Pack-tracked products value their stock per pack (each pack has its own
-    // MRP / cost price); everything else uses the product-level prices.
-    const stockValue = products.reduce((sum, p) => {
-      if (Array.isArray(p.packs) && p.packs.length) {
-        return sum + p.packs.reduce((s, x) => s + x.quantity * (x.cost_price ?? 0), 0);
-      }
-      return sum + p.quantity * p.cost_price;
-    }, 0);
-    const retailValue = products.reduce((sum, p) => {
-      if (Array.isArray(p.packs) && p.packs.length) {
-        return sum + p.packs.reduce((s, x) => s + x.quantity * (x.mrp ?? x.price), 0);
-      }
-      return sum + p.quantity * p.mrp;
-    }, 0);
+    const stockValue = products.reduce((sum, p) => sum + p.quantity * p.cost_price, 0);
+    const retailValue = products.reduce((sum, p) => sum + p.quantity * p.mrp, 0);
 
     res.json({
       stats: {
