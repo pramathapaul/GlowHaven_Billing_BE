@@ -11,7 +11,7 @@ import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { withTransaction } from '../utils/withTransaction.js';
 import { serialize } from '../utils/serialize.js';
 import { calcBillTotals, toPaise } from '../utils/money.js';
-import { resolveColor, resolvePack, deductStock, restoreStock, decorateProductVariants, baseStockOf } from '../utils/stock.js';
+import { resolveColor, deductStock, restoreStock } from '../utils/stock.js';
 
 const router = Router();
 const BILLABLE_ORDER_STATUSES = ['draft', 'confirmed'];
@@ -24,8 +24,6 @@ const standaloneRules = [
   body('items.*.price').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Price cannot be negative.').toFloat(),
   body('items.*.color').optional({ nullable: true }).trim()
     .isLength({ max: 40 }).withMessage('Color name must be 40 characters or fewer.'),
-  body('items.*.pack').optional({ nullable: true }).trim()
-    .isLength({ max: 40 }).withMessage('Pack label must be 40 characters or fewer.'),
 ];
 
 function parseRate(value, name) {
@@ -49,8 +47,7 @@ function parseAmount(value, name) {
 async function billView(bill) {
   const [items, customer] = await Promise.all([
     BillItem.find({ bill_id: bill._id })
-      // `packs` + `selling_price` let clients show the pack's own MRP/price per line.
-      .populate('product_id', 'name sku unit mrp selling_price packs')
+      .populate('product_id', 'name sku unit mrp selling_price')
       .lean(),
     Customer.findById(bill.customer_id).lean(),
   ]);
@@ -76,20 +73,12 @@ async function billView(bill) {
       : null,
     items: items.map((i) => {
       const product = i.product_id ? serialize(i.product_id) : null;
-      if (product) decorateProductVariants(product);
-      // MRP shown on the bill: the pack's own MRP when the line used a pack,
-      // otherwise the product MRP. (Legacy packs fall back to their price.)
-      const packEntry =
-        i.pack && product
-          ? (product.packs || []).find((p) => p.label.toLowerCase() === String(i.pack).toLowerCase())
-          : null;
-      const mrp = packEntry ? (packEntry.mrp ?? packEntry.price) : product?.mrp ?? null;
       return {
         ...serialize(i),
         bill_id: String(bill._id),
         product_id: product ? product.id : String(i.product_id),
         product,
-        mrp,
+        mrp: product?.mrp ?? null,
         line_total: Math.round(i.quantity * i.price * 100) / 100,
       };
     }),
@@ -154,13 +143,12 @@ router.get('/:id/csv', async (req, res, next) => {
       ['Address', view.customer ? view.customer.address || '' : ''],
       ['Order', view.order_id || 'Standalone'],
       [],
-      ['Product', 'SKU', 'MRP', 'Color', 'Pack', 'Quantity', 'Discounted Price', 'Line Total'],
+      ['Product', 'SKU', 'MRP', 'Color', 'Quantity', 'Discounted Price', 'Line Total'],
       ...view.items.map((i) => [
         i.product ? i.product.name : '',
         i.product ? i.product.sku : '',
         i.mrp ?? '',
         i.color || '',
-        i.pack || '',
         i.quantity,
         i.price,
         i.line_total,
@@ -206,8 +194,6 @@ router.delete('/:id', async (req, res, next) => {
             productId: item.product_id,
             quantity: item.quantity,
             color: item.color,
-            // Pack (or big size, when null) must go back to the right bucket.
-            pack: item.pack,
           });
           restored += item.quantity;
         }
@@ -274,18 +260,8 @@ router.post('/toggle-item', async (req, res, next) => {
             );
           }
         }
-        if (item.pack) {
-          const hasPack = (product.packs || []).some(
-            (p) => p.label.toLowerCase() === item.pack.toLowerCase()
-          );
-          if (!hasPack) {
-            throw conflict(
-              `"${product.name}" no longer offers the pack "${item.pack}". Re-add the line item instead.`
-            );
-          }
-        }
 
-        const updated = await deductStock(session, product, item.quantity, item.color, item.pack);
+        const updated = await deductStock(session, product, item.quantity, item.color);
         item.excluded_from_bill = false;
         await item.save({ session });
         return {
@@ -300,7 +276,6 @@ router.post('/toggle-item', async (req, res, next) => {
           productId: item.product_id,
           quantity: item.quantity,
           color: item.color,
-          pack: item.pack,
         });
         item.excluded_from_bill = true;
         await item.save({ session });
@@ -317,7 +292,6 @@ router.post('/toggle-item', async (req, res, next) => {
     });
 
     const product = outcome.product ? serialize(outcome.product) : null;
-    if (product) decorateProductVariants(product);
     res.json({
       item: {
         ...serialize(outcome.item),
@@ -390,7 +364,6 @@ router.post('/from-order/:orderId', async (req, res, next) => {
           quantity: i.quantity,
           price: i.price_at_order,
           color: i.color || null,
-          pack: i.pack || null,
         })),
         { session }
       );
@@ -425,7 +398,7 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
       const lines = [];
       const errors = [];
       const pendingTotal = new Map(); // productId -> qty
-      const pendingVariant = new Map(); // productId|color-or-pack -> qty
+      const pendingColor = new Map(); // productId|color -> qty
 
       for (const entry of entries) {
         const product = await Product.findOne({ _id: entry.productId, deleted_at: null }).session(session);
@@ -442,35 +415,19 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
           continue;
         }
 
-        let pack = null;
-        try {
-          pack = resolvePack(product, entry.pack);
-        } catch (err) {
-          errors.push(err.message);
-          continue;
-        }
-
-        // No pack chosen on a pack-tracked product = the big/original size.
-        const isBase = Boolean(pack && pack.base);
-        const variant = color || (pack && pack.label ? pack.label : null);
-        const variantLabel = variant || (isBase ? 'big size' : null);
         const totalKey = String(product._id);
-        const variantKey = `${product._id}|${(variantLabel || '').toLowerCase()}`;
+        const colorKey = `${product._id}|${(color || '').toLowerCase()}`;
 
         const availableTotal = product.quantity - (pendingTotal.get(totalKey) || 0);
-        const bucketEntry = color
+        const colorEntry = color
           ? product.colors.find((c) => c.color.toLowerCase() === color.toLowerCase())
-          : pack && pack.label
-            ? product.packs.find((p) => p.label.toLowerCase() === pack.label.toLowerCase())
-            : null;
-        const availableVariant = isBase
-          ? baseStockOf(product) - (pendingVariant.get(variantKey) || 0)
-          : bucketEntry
-            ? bucketEntry.quantity - (pendingVariant.get(variantKey) || 0)
-            : availableTotal;
+          : null;
+        const availableVariant = colorEntry
+          ? colorEntry.quantity - (pendingColor.get(colorKey) || 0)
+          : availableTotal;
 
         if (entry.quantity > availableVariant) {
-          const suffix = variantLabel ? ` (${variantLabel})` : '';
+          const suffix = color ? ` (${color})` : '';
           errors.push(
             `Insufficient stock for "${product.name}"${suffix}: requested ${entry.quantity}, available ${availableVariant}.`
           );
@@ -478,15 +435,13 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
         }
 
         pendingTotal.set(totalKey, (pendingTotal.get(totalKey) || 0) + entry.quantity);
-        if (variantLabel) pendingVariant.set(variantKey, (pendingVariant.get(variantKey) || 0) + entry.quantity);
+        if (color) pendingColor.set(colorKey, (pendingColor.get(colorKey) || 0) + entry.quantity);
 
         lines.push({
           product,
           quantity: entry.quantity,
           color,
-          pack: pack ? pack.label : null,
-          // Pack products default to the pack's own price; everything else to the selling price.
-          price: entry.price ?? (pack ? pack.price : (product.selling_price ?? product.mrp)),
+          price: entry.price ?? (product.selling_price ?? product.mrp),
         });
       }
 
@@ -495,7 +450,7 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
 
       // ---- pass 2: atomic stock deduction (guards re-check inside txn) ----
       for (const line of lines) {
-        await deductStock(session, line.product, line.quantity, line.color, line.pack);
+        await deductStock(session, line.product, line.quantity, line.color);
       }
 
       const subtotalPaise = lines.reduce(
@@ -519,7 +474,6 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
           quantity: l.quantity,
           price: l.price,
           color: l.color || null,
-          pack: l.pack || null,
         })),
         { session }
       );
