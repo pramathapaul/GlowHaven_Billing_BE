@@ -4,7 +4,7 @@ import { Product } from '../models/Product.js';
 import { validate } from '../middleware/validate.js';
 import { badRequest, conflict, notFound } from '../utils/ApiError.js';
 import { serialize, escapeRegex } from '../utils/serialize.js';
-import { normalizeColors, normalizePacks, decoratePacks, baseStockOf } from '../utils/stock.js';
+import { normalizeColors } from '../utils/stock.js';
 import { LOW_STOCK_THRESHOLD } from '../config/db.js';
 
 const router = Router();
@@ -16,53 +16,28 @@ const productRules = [
     .isLength({ max: 60 }).withMessage('SKU must be 60 characters or fewer.'),
   body('category').trim().notEmpty().withMessage('Category is required.'),
   body('unit').trim().notEmpty().withMessage('Unit is required.'),
-  // Optional: when the product tracks colors/packs the total is derived from them.
+  // Optional: when the product tracks colors the total is derived from them.
   body('quantity').optional().isFloat({ min: 0 }).withMessage('Quantity must be 0 or more.').toFloat(),
-  // Big/original size stock — only meaningful when the product has packs.
-  body('base_quantity').optional({ nullable: true }).isInt({ min: 0, max: 100000000 })
-    .withMessage('Big-size quantity must be a whole number of 0 or more.').toInt(),
   body('mrp').isFloat({ min: 0 }).withMessage('MRP must be 0 or more.').toFloat(),
   body('selling_price').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Selling price must be 0 or more.').toFloat(),
   body('cost_price').isFloat({ min: 0 }).withMessage('Cost price must be 0 or more.').toFloat(),
 ];
 
-/** Big/original size stock from the payload. Empty/missing = 0 for pack
- *  products, otherwise it mirrors the plain quantity. */
-function resolveBaseQuantity(body, packs, fallbackQuantity) {
-  if (packs.length === 0) return fallbackQuantity;
-  const raw = body.base_quantity;
-  if (raw === undefined || raw === null || raw === '') return 0;
-  const base = Number(raw);
-  if (!Number.isInteger(base) || base < 0) {
-    throw badRequest('Big-size quantity must be a whole number of 0 or more.');
-  }
-  return base;
-}
-
-/** Total = big-size stock + color/pack buckets when tracked, else the given quantity.
- *  Colors and packs are mutually exclusive (a product tracks one or the other). */
+/** Total = color buckets when tracked, else the given quantity. */
 function resolveVariants(body) {
   const colors = normalizeColors(body.colors);
-  const packs = normalizePacks(body.packs);
-  if (colors.length > 0 && packs.length > 0) {
-    throw badRequest('A product can track stock by colors OR packs, not both.');
-  }
-  if (packs.length > 0) {
-    const baseQuantity = resolveBaseQuantity(body, packs, 0);
-    return { colors: [], packs, quantity: baseQuantity + packs.reduce((sum, p) => sum + p.quantity, 0) };
-  }
   if (colors.length > 0) {
     const quantity = colors.reduce((sum, c) => sum + c.quantity, 0);
-    return { colors, packs: [], quantity };
+    return { colors, quantity };
   }
   const quantity = Number(body.quantity);
   if (body.quantity === undefined || body.quantity === null || body.quantity === '') {
-    throw badRequest('Quantity is required when the product has no colors or packs.');
+    throw badRequest('Quantity is required when the product has no colors.');
   }
   if (!Number.isInteger(quantity) || quantity < 0) {
     throw badRequest('Quantity must be a whole number of 0 or more.');
   }
-  return { colors: [], packs: [], quantity };
+  return { colors, quantity };
 }
 
 function decorate(product) {
@@ -74,10 +49,6 @@ function decorate(product) {
   p.low_stock = p.quantity <= LOW_STOCK_THRESHOLD;
   p.colors = Array.isArray(p.colors) ? p.colors : [];
   p.tracks_colors = p.colors.length > 0;
-  p.packs = decoratePacks(p.packs);
-  p.tracks_packs = p.packs.length > 0;
-  // Big/original size stock (equals `quantity` for products without packs).
-  p.base_quantity = baseStockOf(p);
   return p;
 }
 
@@ -127,7 +98,7 @@ router.get('/:id', async (req, res, next) => {
 // Create
 router.post('/', productRules, validate, async (req, res, next) => {
   try {
-    const { colors, packs, quantity } = resolveVariants(req.body);
+    const { colors, quantity } = resolveVariants(req.body);
     const normalisedSku = String(req.body.sku).trim().toUpperCase();
     const existing = await Product.findOne({ sku: normalisedSku });
     if (existing) throw conflict(`SKU "${normalisedSku}" already exists${existing.deleted_at ? ' (soft-deleted)' : ''}.`);
@@ -138,7 +109,6 @@ router.post('/', productRules, validate, async (req, res, next) => {
       unit: String(req.body.unit).trim(),
       quantity,
       colors,
-      packs,
       mrp: req.body.mrp,
       selling_price: req.body.selling_price ?? req.body.mrp,
       cost_price: req.body.cost_price,
@@ -155,13 +125,7 @@ router.put('/:id', productRules, validate, async (req, res, next) => {
     const product = await Product.findById(req.params.id);
     if (!product) throw notFound('Product not found.');
     if (product.deleted_at) throw conflict('This product is deleted. Restore it before editing.');
-    // Callers that don't send base_quantity (older clients) keep the big-size
-    // stock the product already has — never silently wipe it.
-    const payload = { ...req.body };
-    if (payload.base_quantity === undefined) {
-      payload.base_quantity = baseStockOf(product);
-    }
-    const { colors, packs, quantity } = resolveVariants(payload);
+    const { colors, quantity } = resolveVariants(req.body);
     const normalisedSku = String(req.body.sku).trim().toUpperCase();
     const clash = await Product.findOne({ sku: normalisedSku, _id: { $ne: product._id } });
     if (clash) throw conflict(`SKU "${normalisedSku}" already exists.`);
@@ -171,7 +135,6 @@ router.put('/:id', productRules, validate, async (req, res, next) => {
     product.unit = String(req.body.unit).trim();
     product.quantity = quantity;
     product.colors = colors;
-    product.packs = packs;
     product.mrp = req.body.mrp;
     product.selling_price = req.body.selling_price ?? req.body.mrp;
     product.cost_price = req.body.cost_price;
