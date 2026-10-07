@@ -4,6 +4,7 @@ import { jsonOptions } from './schemaOptions.js';
 const billSchema = new mongoose.Schema(
   {
     order_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
+    site_order_id: { type: String, default: null, trim: true, maxlength: 60 },
     customer_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Customer',
