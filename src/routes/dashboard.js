@@ -64,6 +64,7 @@ router.get('/stats', async (req, res, next) => {
         ...serialize(b),
         customer_id: String(b.customer_id),
         order_id: b.order_id ? String(b.order_id) : null,
+        site_order_id: b.site_order_id || null,
         customer_name: bcmap.get(String(b.customer_id)) || '—',
       })),
     });
