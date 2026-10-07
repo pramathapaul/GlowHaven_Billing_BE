@@ -55,7 +55,7 @@ function decorate(product) {
 // List + search (name / sku / category), low-stock filter, soft-delete filter
 router.get('/', async (req, res, next) => {
   try {
-    const { search, category, lowStock, includeDeleted } = req.query;
+    const { search, category, lowStock, includeDeleted, outOfStock } = req.query;
     const threshold = req.query.threshold !== undefined ? Number(req.query.threshold) : LOW_STOCK_THRESHOLD;
     const q = {};
     if (includeDeleted !== 'true') q.deleted_at = null;
@@ -64,7 +64,9 @@ router.get('/', async (req, res, next) => {
       const rx = new RegExp(escapeRegex(String(search).trim()), 'i');
       q.$or = [{ name: rx }, { sku: rx }, { category: rx }];
     }
-    if (lowStock === 'true' || lowStock === '1') {
+    if (outOfStock === 'true' || outOfStock === '1') {
+      q.quantity = 0;
+    } else if (lowStock === 'true' || lowStock === '1') {
       q.quantity = { $lte: Number.isFinite(threshold) ? threshold : LOW_STOCK_THRESHOLD };
     }
     const products = await Product.find(q).sort({ name: 1 }).exec();
