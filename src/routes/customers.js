@@ -99,6 +99,7 @@ router.get('/:id', async (req, res, next) => {
       ...serialize(b),
       customer_id: String(b.customer_id),
       order_id: b.order_id ? String(b.order_id) : null,
+      site_order_id: b.site_order_id || null,
       items_count: (itemsByBill.get(String(b._id)) || []).length,
     }));
 
