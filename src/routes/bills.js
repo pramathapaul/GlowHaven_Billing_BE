@@ -24,6 +24,8 @@ const standaloneRules = [
   body('items.*.price').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Price cannot be negative.').toFloat(),
   body('items.*.color').optional({ nullable: true }).trim()
     .isLength({ max: 40 }).withMessage('Color name must be 40 characters or fewer.'),
+  body('siteOrderId').optional({ nullable: true }).trim()
+    .isLength({ max: 60 }).withMessage('Site order id must be 60 characters or fewer.'),
 ];
 
 function parseRate(value, name) {
@@ -57,6 +59,7 @@ async function billView(bill) {
     ...serialize(bill),
     customer_id: String(bill.customer_id),
     order_id: bill.order_id ? String(bill.order_id) : null,
+    site_order_id: bill.site_order_id || null,
     delivery_charge: bill.delivery_charge || 0,
     customer: customer
       ? {
@@ -103,6 +106,7 @@ router.get('/', async (req, res, next) => {
         ...serialize(b),
         customer_id: String(b.customer_id),
         order_id: b.order_id ? String(b.order_id) : null,
+        site_order_id: b.site_order_id || null,
         customer: cmap.get(String(b.customer_id)) || null,
       })),
     });
@@ -141,7 +145,7 @@ router.get('/:id/csv', async (req, res, next) => {
       ['Phone 2', view.customer ? view.customer.phone2 || '' : ''],
       ['Email', view.customer ? view.customer.email || '' : ''],
       ['Address', view.customer ? view.customer.address || '' : ''],
-      ['Order', view.order_id || 'Standalone'],
+      ['Order', view.site_order_id || view.order_id || view.id],
       [],
       ['Product', 'SKU', 'MRP', 'Color', 'Quantity', 'Discounted Price', 'Line Total'],
       ...view.items.map((i) => [
@@ -388,6 +392,7 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
   try {
     const discountRate = parseRate(req.body.discountRate, 'Discount rate');
     const deliveryCharge = parseAmount(req.body.deliveryCharge, 'Delivery charge');
+    const siteOrderId = String(req.body.siteOrderId ?? '').trim() || null;
     const entries = req.body.items;
 
     const bill = await withTransaction(async (session) => {
@@ -461,6 +466,7 @@ router.post('/standalone', standaloneRules, validate, async (req, res, next) => 
 
       const billDoc = new Bill({
         order_id: null,
+        site_order_id: siteOrderId,
         customer_id: customer._id,
         ...totals,
         discount_rate: discountRate,
