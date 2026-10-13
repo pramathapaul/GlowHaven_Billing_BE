@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { body } from 'express-validator';
+import { UPI_ID, UPI_NAME } from '../config/db.js';
 import { Bill } from '../models/Bill.js';
 import { BillItem } from '../models/BillItem.js';
 import { Order } from '../models/Order.js';
@@ -61,6 +62,12 @@ async function billView(bill) {
     order_id: bill.order_id ? String(bill.order_id) : null,
     site_order_id: bill.site_order_id || null,
     delivery_charge: bill.delivery_charge || 0,
+    payment: UPI_ID
+      ? {
+          upi_id: UPI_ID,
+          upi_name: UPI_NAME,
+        }
+      : null,
     customer: customer
       ? {
           id: String(customer._id),
